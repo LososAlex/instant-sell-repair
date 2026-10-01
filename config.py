@@ -14,7 +14,7 @@ if os.path.exists(_ENV):
                 os.environ.setdefault(_k.strip(), _v.strip().strip('\'"'))
 
 # Прод-API Instant Sell (бэк — копия свопа: /bots/broken, /bots/repair, /bots/{id}/dead).
-API_URL = ''  # TODO: https://<хост прода IS>/api/v1/bots
+API_URL = 'https://neural-product-isell-87ca8e26b5bd.herokuapp.com/api/v1/bots'
 ADMIN_KEY = os.environ.get('SWAPS_ADMIN_KEY', '')  # заголовок x-bots-admin-key
 
 MONGO_URI = os.environ['MONGO_URI']
@@ -45,26 +45,26 @@ KNOWN_REASONS = (COOKIE_REASONS + CAPTCHA_REASONS + REPAIR_ONLY_REASONS
                  + [REASON_BANNED, REASON_NO_PRVT] + SKIP_REASONS)
 
 # Мониторинг -> Grafana (сервис bot_events, как в ФС). Пусто = телеметрия выключена.
-MONITORING_URL = ''     # TODO: эндпоинт сервиса bot_events (уточнить у Алексея/Максима)
+MONITORING_URL = 'http://37.27.99.126:8000'   # bot_events, тот же сервис, что у свопа
 MONITORING_KEY = os.environ.get('MONITORING_KEY', '')  # x-api-key сервиса
 STAGE = 'production'    # для бота незнакомой игры; иначе stage из GAMES
 # /broken отдаёт ботов ВСЕХ игр свопа. По game бота (число enum Games) — метка в телеграм и
 # stage в Grafana, тот же, что у ротатора этой игры (на сервере mm2: 'mm2-swap-production').
 GAMES = {
-    # TODO: подтвердить stage; метка с IS — чтобы в общем чате не спутать со свопом
+    # метка с IS — чтобы не спутать со свопом
     4: {'label': 'IS MM2', 'stage': 'mm2-instant-sell-production'},
     0: {'label': 'IS Adopt', 'stage': 'adopt-instant-sell-production'},
 }
 
 # Телеграм-алерты. Пустой токен = уведомления выключены.
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
-TELEGRAM_CHAT_ID = -1004451829914  # TODO: свой чат/топики IS, ниже — топики свопа
-TELEGRAM_API_BASE = 'http://93.183.95.193:8081'  # свой Bot API-сервер; '' -> https://api.telegram.org
+TELEGRAM_CHAT_ID = -1004296860031  # «Instant-sell_Repair», бот @NotifyInstantSellBot
+TELEGRAM_API_BASE = ''  # облачный api.telegram.org: со стенда он доступен напрямую
 THREAD_IDS = {
     'general': None,  # топик General шлётся БЕЗ message_thread_id (id=1 -> 400 "message thread not found")
-    'new_brokens_in_prod': 3,
-    'broken_cookie': 5,
-    'refresh_updated': 7,
-    'broken_refresh': 9,
-    'captcha_in_roblox': 11,
+    'new_brokens_in_prod': 4,  # Новые брокены
+    'broken_cookie': 5,        # Нет в базе
+    'refresh_updated': 6,      # Куки обновлены
+    'broken_refresh': 7,       # Сломан рефреш
+    'captcha_in_roblox': 8,    # Капча
 }
