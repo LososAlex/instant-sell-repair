@@ -24,6 +24,9 @@ def send_message(text, thread_key):
     if thread_id is not None:
         data['message_thread_id'] = thread_id
     try:
-        requests.post(f'{base}/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage', json=data, timeout=10)
+        r = requests.post(f'{base}/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage', json=data, timeout=10)
+        if not r.ok:
+            # 400/403/429 раньше терялись молча: сообщение не доходило, а в логе пусто
+            logging.error('[telegram] HTTP %s %s', r.status_code, r.text[:300])
     except Exception as e:
         logging.error('[telegram] send failed: %s', e)
