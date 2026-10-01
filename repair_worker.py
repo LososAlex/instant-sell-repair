@@ -268,7 +268,9 @@ def notify_new(bots):
     _prev_broken = set(current)
     if not new:
         return
-    txt = f'Новые брокен-боты в свопе ({len(new)}):\n'
+    # заголовок у каждого сервиса свой (своп / Instant Sell). getattr — чтобы старый серверный
+    # config.py без этого ключа не ронял тик: деплой свопа — копированием файлов руками
+    txt = f'{getattr(config, "BROKEN_TITLE", "Новые брокен-боты в свопе")} ({len(new)}):\n'
     txt += ''.join(f'{tag(current[n])} <b>{n}</b>\n' for n in new[:50])
     if len(new) > 50:
         txt += f'... и ещё {len(new) - 50}\n'

@@ -60,6 +60,7 @@ GAMES = {
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_CHAT_ID = -1004296860031  # «Instant-sell_Repair», бот @NotifyInstantSellBot
 TELEGRAM_API_BASE = ''  # облачный api.telegram.org: со стенда он доступен напрямую
+BROKEN_TITLE = 'Новые брокен-боты в Instant Sell'   # заголовок списка новых брокенов
 THREAD_IDS = {
     'general': None,  # топик General шлётся БЕЗ message_thread_id (id=1 -> 400 "message thread not found")
     'new_brokens_in_prod': 4,  # Новые брокены
