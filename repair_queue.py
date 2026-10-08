@@ -46,8 +46,9 @@ def last_ticket(client, bot_id):
         return None
 
 
-def create_ticket(client, bot_id, username, reason):
-    """queued-тикет с priority=1, если активного нет. True если создан."""
+def create_ticket(client, bot_id, username, reason, service=None):
+    """queued-тикет с priority=1, если активного нет. True если создан.
+    service — чей бот (метка из config.GAMES), пишем в тикет, если задан."""
     try:
         if _coll(client).find_one({'bot_id': bot_id, 'status': {'$in': list(ACTIVE_STATUSES)}},
                                   projection={'_id': 1}):
@@ -70,6 +71,7 @@ def create_ticket(client, bot_id, username, reason):
             'claimed_at': None,
             'resolved_at': None,
             'notes': None,
+            **({'service': service} if service else {}),
         })
         logging.info('ticket created: %s reason=%s', username, reason)
         return True

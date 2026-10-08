@@ -132,7 +132,7 @@ def _alert_once(reason, bot_id, chat_key, text):
 
 
 def open_captcha_ticket(client, b, _id, name):
-    if rq.create_ticket(client, _id, name, rq.REASON_CAPTCHA):
+    if rq.create_ticket(client, _id, name, rq.REASON_CAPTCHA, game_of(b).get('service')):
         mon.send_event(name, 'bot_in_roblox_captcha', ev(b))
         tg.send_message(f'{tag(b)} <b>{name}</b> словил капчу, тикет на ручную починку', 'captcha_in_roblox')
 
@@ -312,6 +312,7 @@ def selfcheck():
     assert ev({'game': 4}, mode='x') == {'stage': mm2['stage'], 'game': mm2['label'], 'mode': 'x'}
     assert tag({'game': 0}) == f'[{adopt["label"]}]' and tag({'game': 7}) == '[game=7]'
     assert ev({'game': 7})['stage'] == config.STAGE
+    assert game_of({'game': 4}).get('service') == mm2.get('service') and 'service' not in game_of({'game': 7})
     print('selfcheck ok')
 
 

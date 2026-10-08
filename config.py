@@ -52,7 +52,7 @@ STAGE = 'production'    # для бота незнакомой игры; ина�
 # stage в Grafana, тот же, что у ротатора этой игры (на сервере mm2: 'mm2-swap-production').
 GAMES = {
     # метка с IS — чтобы не спутать со свопом
-    4: {'label': 'IS MM2', 'stage': 'mm2-instant-sell-production'},
+    4: {'label': 'IS MM2', 'stage': 'mm2-instant-sell-production', 'service': 'Instant-sell_mm2'},
     0: {'label': 'IS Adopt', 'stage': 'adopt-instant-sell-production'},
 }
 
