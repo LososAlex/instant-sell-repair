@@ -15,6 +15,8 @@
                                 после MAX_REPAIR_ATTEMPTS -> тикет refresh_invalid;
         BROKEN, cookies < 2  -> тикет refresh_invalid;
         CAPTCHA              -> тикет captcha.
+  NO_ACCESS_TO_PRVT_SERVER -> repair с VIP-ссылкой и кодом приватки из записи свопа
+  (mm2_swap / adopt_swap); у MM2 только при живом VIP (vip_server_until), иначе алерт.
 
 Куки берём из accounts_p2p. Прод-uuid для /repair берём из /broken (поле bot_id).
 enable после repair НЕ делаем — это сторона бэка. Логи -> logs/repair.log (ротация).
@@ -24,6 +26,7 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
 import psycopg2
@@ -139,6 +142,57 @@ def open_captcha_ticket(client, b, _id, name):
         tg.send_message(f'{tag(b)} <b>{name}</b> словил капчу, тикет на ручную починку', 'captcha_in_roblox')
 
 
+_prvt_repaired = {}  # bot_id -> когда переотправили приватку (time.time()). В памяти процесса
+
+
+def prvt_problem(doc, vip_required, now):
+    """Почему приватку не чиним; None — чиним. doc — запись свопа (roblox_link, access_code,
+    vip_server_until)."""
+    if not doc:
+        return 'нет записи в коллекции свопа'
+    if not (doc.get('roblox_link') and doc.get('access_code')):
+        return 'нет VIP-ссылки или кода приватки'
+    if vip_required:
+        until = doc.get('vip_server_until')
+        if not until:
+            return 'VIP не куплен'
+        if until <= now:
+            return f'VIP истёк {until:%d.%m} — нужна докупка'
+    return None
+
+
+def repair_private(client, b, name):
+    """NO_ACCESS_TO_PRVT_SERVER -> заново шлём в прод VIP-ссылку и код приватки из записи свопа
+    (repair с private_server_link + access_code, кука не трогается). MM2 — только при живом VIP
+    (vip_server_until в будущем): с истёкшим сервером чинить нечем, алерт. Adopt — как есть."""
+    g = game_of(b)
+    rid = b['roblox_account_id']
+    doc = None
+    if g.get('collection'):
+        doc = client[config.MONGO_DB][g['collection']].find_one(
+            {'roblox_id': {'$in': [int(rid), str(rid)]}},
+            {'roblox_link': 1, 'access_code': 1, 'vip_server_until': 1})
+    why = prvt_problem(doc, g.get('vip_required'), datetime.utcnow())
+    if why:
+        mon.send_event(name, 'bot_bad_private', ev(b, reason=why))
+        _alert_once(config.REASON_NO_PRVT, b.get('bot_id'), 'general',
+                    f'{tag(b)} <b>{name}</b> нет доступа к приватному серверу, не чиню: {why}')
+        return
+    last = _prvt_repaired.get(b['bot_id'])
+    if last and time.time() - last < config.PRVT_REPAIR_COOLDOWN_SEC:
+        _alert_once('prvt_again', b.get('bot_id'), 'general',
+                    f'{tag(b)} <b>{name}</b> приватку переотправили меньше часа назад, а доступа снова '
+                    f'нет — проверить VIP-ссылку вручную')
+        return
+    if repair([{'bot_id': b['bot_id'], 'private_server_link': doc['roblox_link'],
+                'access_code': doc['access_code']}]):
+        _prvt_repaired[b['bot_id']] = time.time()
+        until = doc.get('vip_server_until')
+        mon.send_event(name, 'bot_private_repaired', ev(b))
+        tg.send_message(f'{tag(b)} <b>{name}</b> нет доступа к приватке — переотправили VIP-ссылку и код'
+                        + (f' (VIP до {until:%d.%m})' if until else ''), 'general')
+
+
 def handle_broken(client, b):
     """Один бот из /broken. Диспатч по reason (см. config)."""
     name = b.get('roblox_nickname')
@@ -163,9 +217,7 @@ def handle_broken(client, b):
         return
     if reason == config.REASON_NO_PRVT:
         logging.info('нет доступа к приват-серверу: %s', name)
-        mon.send_event(name, 'bot_bad_private', ev(b))
-        _alert_once(reason, b.get('bot_id'), 'general',
-                    f'{tag(b)} <b>{name}</b> нет доступа к приватному серверу — проверить VIP-ссылку')
+        repair_private(client, b, name)
         return
     if reason in config.REPAIR_ONLY_REASONS:
         repair([{'bot_id': b['bot_id']}])  # просто дёргаем ручку без кук
@@ -365,6 +417,13 @@ def selfcheck():
     assert pick_captcha_empty(cb, {'d'}, empty, 20) == ([cb[0], cb[3]], 2)
     assert pick_captcha_empty(cb, {'d'}, empty, 1) == ([cb[0]], 2), 'предохранитель'
     assert pick_captcha_empty(cb, set(), set(), 20) == ([], 0)
+    # приватка: MM2 чиним только с живым VIP, Adopt — с тем, что есть
+    now, link = datetime(2026, 10, 14), {'roblox_link': 'l', 'access_code': 'c'}
+    assert prvt_problem({**link, 'vip_server_until': datetime(2026, 12, 1)}, True, now) is None
+    assert 'истёк' in prvt_problem({**link, 'vip_server_until': datetime(2026, 10, 3)}, True, now)
+    assert prvt_problem(link, True, now) == 'VIP не куплен'
+    assert prvt_problem(link, None, now) is None, 'Adopt: срока нет — чиним'
+    assert prvt_problem({'roblox_link': 'l'}, None, now) and prvt_problem(None, None, now)
     # игра бота: метка в телеграм, stage в Grafana; незнакомая — общий STAGE
     mm2, adopt = config.GAMES[4], config.GAMES[0]   # метки из конфига: у копии IS свои
     assert ev({'game': 4}, mode='x') == {'stage': mm2['stage'], 'game': mm2['label'], 'mode': 'x'}

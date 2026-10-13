@@ -56,11 +56,16 @@ MONITORING_KEY = os.environ.get('MONITORING_KEY', '')  # x-api-key сервис�
 STAGE = 'production'    # для бота незнакомой игры; иначе stage из GAMES
 # /broken отдаёт ботов ВСЕХ игр свопа. По game бота (число enum Games) — метка в телеграм и
 # stage в Grafana, тот же, что у ротатора этой игры (на сервере mm2: 'mm2-swap-production').
+# collection / vip_required — для починки NO_ACCESS_TO_PRVT_SERVER (см. config свопа). Записи IS
+# лежат в той же mm2_swap (service = instant_sell). У IS Adopt коллекции нет — только алерт.
 GAMES = {
     # метка с IS — чтобы не спутать со свопом
-    4: {'label': 'IS MM2', 'stage': 'mm2-instant-sell-production', 'service': 'Instant-sell_mm2'},
+    4: {'label': 'IS MM2', 'stage': 'mm2-instant-sell-production', 'service': 'Instant-sell_mm2',
+        'collection': 'mm2_swap', 'vip_required': True},
     0: {'label': 'IS Adopt', 'stage': 'adopt-instant-sell-production'},
 }
+# Починили приватку, а бот снова без доступа раньше этого срока -> не чиним по кругу, алерт.
+PRVT_REPAIR_COOLDOWN_SEC = 3600
 
 # Телеграм-алерты. Пустой токен = уведомления выключены.
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
