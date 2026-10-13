@@ -2,6 +2,7 @@
 
 Каждый цикл: GET /bots/broken ->
   сначала INVENTORY с незакрытым тикетом moderated -> DEAD (kill_moderated, ключ CV),
+  потом TRADE/INVENTORY с капчей и 0 предметов -> DEAD (kill_captcha_empty, ключ CV + БД бэка),
   их дальше не чиним; по остальным ботам (как в прод-ФС):
   - есть активный тикет (queued/in_progress) -> пропуск, его чинят;
   - последний тикет fixed (воркер починки обновил accounts_p2p) -> до-применяем repair:
@@ -25,6 +26,7 @@ import sys
 import time
 from logging.handlers import RotatingFileHandler
 
+import psycopg2
 import pymongo
 import requests
 
@@ -223,17 +225,12 @@ def mark_dead(b):
     return r.status_code == 200
 
 
-def kill_moderated(client, bots):
-    """Замодеренный аккаунт не чинится ничем, а BROKEN держит место в лимите парка —
-    ротатор не может залить замену. Поэтому DEAD. Стока у INVENTORY нет (01.10: 0 штук
-    на 180 живых), откат — PATCH /bots/repair. Тикет moderated после DEAD закрываем (resolved).
+def dead_batch(client, hits, total, reason, title):
+    """hits -> DEAD, их незакрытые тикеты reason закрываем (resolved). total — кандидатов
+    всего: сверх предохранителя пишем в general. Откат DEAD — PATCH /bots/repair.
     Возвращает bot_id списанных — их дальше не чиним."""
-    if not config.CV_KEY:
-        return set()
-    moderated = rq.open_moderated(client, {b.get('roblox_nickname') for b in bots})
-    hits, total = pick_moderated(bots, moderated, config.MAX_DEAD_PER_TICK)
     if total > len(hits):
-        tg.send_message(f'⚠️ Замодеренных INVENTORY на списание {total} — больше предохранителя '
+        tg.send_message(f'⚠️ {title}: на списание {total} — больше предохранителя '
                         f'{config.MAX_DEAD_PER_TICK}, за цикл беру {len(hits)}', 'general')
     dead = []
     for b in hits:
@@ -245,16 +242,66 @@ def kill_moderated(client, bots):
             ok = False
         if not ok:
             _alert_once('dead_failed', b.get('bot_id'), 'general',
-                        f'{tag(b)} <b>{name}</b> замодерен, но DEAD не поставился — см. logs/repair.log')
+                        f'{tag(b)} <b>{name}</b> на списание ({title}), но DEAD не поставился — '
+                        f'см. logs/repair.log')
             continue
         dead.append(b)
-        rq.resolve_moderated(client, name)
-        mon.send_event(name, 'bot_dead', ev(b, reason=rq.REASON_MODERATED, type='INVENTORY'))
+        rq.resolve_open(client, reason, name, f'bot DEAD in swap prod ({reason}) by swap repair-worker')
+        mon.send_event(name, 'bot_dead', ev(b, reason=reason, type=b.get('type')))
     if dead:
-        tg.send_message(f'Замодеренные INVENTORY → DEAD ({len(dead)}):\n'
+        tg.send_message(f'{title} → DEAD ({len(dead)}):\n'
                         + ''.join(f'{tag(b)} <b>{b.get("roblox_nickname")}</b>\n' for b in dead),
                         'general')
     return {b.get('bot_id') for b in dead}
+
+
+def kill_moderated(client, bots):
+    """Замодеренный аккаунт не чинится ничем, а BROKEN держит место в лимите парка —
+    ротатор не может залить замену. Поэтому DEAD. Стока у INVENTORY нет (01.10: 0 штук
+    на 180 живых). Возвращает bot_id списанных."""
+    if not config.CV_KEY:
+        return set()
+    moderated = rq.open_tickets(client, rq.REASON_MODERATED, {b.get('roblox_nickname') for b in bots})
+    hits, total = pick_moderated(bots, moderated, config.MAX_DEAD_PER_TICK)
+    return dead_batch(client, hits, total, rq.REASON_MODERATED, 'Замодеренные INVENTORY')
+
+
+def empty_bots(rids):
+    """roblox_account_id из rids, у которых в БД бэка нет ни одного предмета (inventory_items;
+    на 14.10 bots.items_count с ним совпадал у всех капча-ботов)."""
+    conn = psycopg2.connect(config.SWAPS_PG_DSN)
+    try:
+        cur = conn.cursor()
+        cur.execute('select b.roblox_account_id::text from bots b '
+                    'where b.roblox_account_id::text = any(%s) and not exists ('
+                    'select 1 from inventory_items i where i.roblox_account_id = b.roblox_account_id)',
+                    (list(rids),))
+        return {r[0] for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def pick_captcha_empty(bots, ticketed, empty, cap):
+    """Кого списать: капча (reason из /broken или незакрытый тикет captcha по нику) и 0 предметов
+    (roblox_account_id в empty), только CAPTCHA_EMPTY_TYPES. -> (до cap ботов, кандидатов всего)."""
+    hits = [b for b in bots
+            if b.get('type') in config.CAPTCHA_EMPTY_TYPES
+            and (b.get('reason') in config.CAPTCHA_REASONS or b.get('state') == 'CAPTCHA'
+                 or b.get('roblox_nickname') in ticketed)
+            and str(b.get('roblox_account_id')) in empty]
+    return hits[:cap], len(hits)
+
+
+def kill_captcha_empty(client, bots):
+    """Капча + 0 предметов -> DEAD (Алексей, 14.10): чинить капчу руками ради пустого бота
+    незачем, а BROKEN держит место в лимите парка. Стока нет — терять нечего, ротатор
+    переведёт запись в done и зальёт замену. Возвращает bot_id списанных."""
+    if not (config.CV_KEY and config.SWAPS_PG_DSN):
+        return set()
+    ticketed = rq.open_tickets(client, rq.REASON_CAPTCHA, {b.get('roblox_nickname') for b in bots})
+    empty = empty_bots({str(b.get('roblox_account_id')) for b in bots})
+    hits, total = pick_captcha_empty(bots, ticketed, empty, config.MAX_DEAD_PER_TICK)
+    return dead_batch(client, hits, total, rq.REASON_CAPTCHA, 'Капча, 0 предметов')
 
 
 _prev_broken = set()
@@ -287,11 +334,12 @@ def tick(client):
     if not bots:
         logging.info('брокенов нет')
         return
-    try:
-        dead = kill_moderated(client, bots)
-    except Exception as e:  # списание не должно ломать починку остальных
-        logging.error('kill_moderated error: %r', e)
-        dead = set()
+    dead = set()
+    for kill in (kill_moderated, kill_captcha_empty):
+        try:
+            dead |= kill(client, [b for b in bots if b.get('bot_id') not in dead])
+        except Exception as e:  # списание не должно ломать починку остальных
+            logging.error('%s error: %r', kill.__name__, e)
     for b in bots:
         if b.get('bot_id') in dead:
             continue
@@ -307,6 +355,16 @@ def selfcheck():
     assert pick_moderated(bots, {'a', 'b'}, 20) == ([bots[0]], 1), 'TRADE не списываем'
     assert pick_moderated(bots, {'a', 'c'}, 1) == ([bots[0]], 2), 'предохранитель'
     assert pick_moderated(bots, set(), 20) == ([], 0)
+    # капча + 0 предметов: reason или тикет по нику; VETERAN и боты с предметами не трогаем
+    cb = [{'roblox_account_id': '1', 'type': 'TRADE', 'reason': 'TRADE_CAPTCHA_ERROR'},
+          {'roblox_account_id': '2', 'type': 'TRADE', 'reason': 'TRADE_CAPTCHA_ERROR'},
+          {'roblox_account_id': '3', 'type': 'VETERAN', 'reason': 'TRADE_CAPTCHA_ERROR'},
+          {'roblox_account_id': '4', 'type': 'INVENTORY', 'reason': None, 'roblox_nickname': 'd'},
+          {'roblox_account_id': '5', 'type': 'INVENTORY', 'reason': None, 'roblox_nickname': 'e'}]
+    empty = {'1', '3', '4', '5'}
+    assert pick_captcha_empty(cb, {'d'}, empty, 20) == ([cb[0], cb[3]], 2)
+    assert pick_captcha_empty(cb, {'d'}, empty, 1) == ([cb[0]], 2), 'предохранитель'
+    assert pick_captcha_empty(cb, set(), set(), 20) == ([], 0)
     # игра бота: метка в телеграм, stage в Grafana; незнакомая — общий STAGE
     mm2, adopt = config.GAMES[4], config.GAMES[0]   # метки из конфига: у копии IS свои
     assert ev({'game': 4}, mode='x') == {'stage': mm2['stage'], 'game': mm2['label'], 'mode': 'x'}

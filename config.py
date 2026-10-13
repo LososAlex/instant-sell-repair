@@ -40,6 +40,12 @@ SKIP_REASONS = []  # не поломка бота (бизнес-причина) 
 CV_KEY = os.environ.get('CV_KEY', '')  # заголовок x-cv-key
 MAX_DEAD_PER_TICK = 20  # предохранитель от массового списания: больше за цикл не трогаем
 
+# Списание пустых капча-ботов (с 2026-10-14): капча (reason из /broken или незакрытый тикет
+# captcha) + 0 предметов -> DEAD. /broken число предметов не отдаёт, берём inventory_items из БД
+# этого бэка (прод-БД IS). Пустой SWAPS_PG_DSN (или CV_KEY) = не списываем. VETERAN не трогаем.
+SWAPS_PG_DSN = os.environ.get('SWAPS_PG_DSN', '')
+CAPTCHA_EMPTY_TYPES = ('TRADE', 'INVENTORY')
+
 # reason не из KNOWN_REASONS -> считаем новым, разово алертим в general.
 KNOWN_REASONS = (COOKIE_REASONS + CAPTCHA_REASONS + REPAIR_ONLY_REASONS
                  + [REASON_BANNED, REASON_NO_PRVT] + SKIP_REASONS)

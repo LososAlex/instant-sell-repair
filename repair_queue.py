@@ -18,15 +18,15 @@ REASON_MODERATED = 'moderated'  # аккаунт замодерен Roblox; ти
 ACTIVE_STATUSES = ('queued', 'in_progress')
 
 
-def open_moderated(client, usernames):
-    """Ники из списка с незакрытым тикетом moderated. Джойн по username: bot_id тикета —
+def open_tickets(client, reason, usernames):
+    """Ники из списка с незакрытым тикетом reason. Джойн по username: bot_id тикета —
     _id из accounts_p2p, а не прод-uuid из /broken."""
     try:
         return set(_coll(client).distinct('username', {
-            'reason': REASON_MODERATED, 'status': {'$in': list(ACTIVE_STATUSES)},
+            'reason': reason, 'status': {'$in': list(ACTIVE_STATUSES)},
             'username': {'$in': list(usernames)}}))
     except PyMongoError as e:
-        logging.error('moderated lookup failed: %s', e)
+        logging.error('%s lookup failed: %s', reason, e)
         return set()
 
 
@@ -80,16 +80,14 @@ def create_ticket(client, bot_id, username, reason, service=None):
         return False
 
 
-def resolve_moderated(client, username):
-    """Бот списан в DEAD -> закрываем его незакрытые тикеты moderated: чинить больше нечего."""
+def resolve_open(client, reason, username, note):
+    """Бот списан в DEAD -> закрываем его незакрытые тикеты reason: чинить больше нечего."""
     try:
         _coll(client).update_many(
-            {'reason': REASON_MODERATED, 'status': {'$in': list(ACTIVE_STATUSES)},
-             'username': username},
-            {'$set': {'status': 'resolved', 'resolved_at': datetime.utcnow(),
-                      'notes': 'bot DEAD in swap prod (moderated INVENTORY) by swap repair-worker'}})
+            {'reason': reason, 'status': {'$in': list(ACTIVE_STATUSES)}, 'username': username},
+            {'$set': {'status': 'resolved', 'resolved_at': datetime.utcnow(), 'notes': note}})
     except PyMongoError as e:
-        logging.error('resolve moderated failed %s: %s', username, e)
+        logging.error('resolve %s failed %s: %s', reason, username, e)
 
 
 def resolve_ticket(client, ticket_id, note='resolved by swap repair-worker'):
