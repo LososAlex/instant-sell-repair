@@ -16,7 +16,8 @@
         BROKEN, cookies < 2  -> тикет refresh_invalid;
         CAPTCHA              -> тикет captcha.
   NO_ACCESS_TO_PRVT_SERVER -> repair с VIP-ссылкой и кодом приватки из записи свопа
-  (mm2_swap / adopt_swap); у MM2 только при живом VIP (vip_server_until), иначе алерт.
+  (mm2_swap / adopt_swap); у MM2 только при живом VIP (vip_server_until): истёк — алерт,
+  не куплен — покупаем через Worker3 (buy_vip_for_prod) и чиним новой ссылкой.
 
 Куки берём из accounts_p2p. Прод-uuid для /repair берём из /broken (поле bot_id).
 enable после repair НЕ делаем — это сторона бэка. Логи -> logs/repair.log (ротация).
@@ -143,36 +144,92 @@ def open_captcha_ticket(client, b, _id, name):
 
 
 _prvt_repaired = {}  # bot_id -> когда переотправили приватку (time.time()). В памяти процесса
+_vip_tried = {}      # bot_id -> когда пробовали купить VIP. В памяти процесса
+
+VIP_NOT_BOUGHT = 'VIP не куплен'
+PRVT_FIELDS = {'roblox_link': 1, 'access_code': 1, 'vip_server_until': 1, 'username': 1,
+               'status': 1, 'robux_balance': 1, 'mm2_trade_access': 1}
 
 
 def prvt_problem(doc, vip_required, now):
     """Почему приватку не чиним; None — чиним. doc — запись свопа (roblox_link, access_code,
-    vip_server_until)."""
+    vip_server_until). VIP_NOT_BOUGHT — не приговор: repair_private попробует купить."""
     if not doc:
         return 'нет записи в коллекции свопа'
-    if not (doc.get('roblox_link') and doc.get('access_code')):
-        return 'нет VIP-ссылки или кода приватки'
     if vip_required:
         until = doc.get('vip_server_until')
         if not until:
-            return 'VIP не куплен'
+            return VIP_NOT_BOUGHT
         if until <= now:
             return f'VIP истёк {until:%d.%m} — нужна докупка'
+    if not (doc.get('roblox_link') and doc.get('access_code')):
+        return 'нет VIP-ссылки или кода приватки'
     return None
+
+
+def vip_gate_problem(doc, min_balance):
+    """Почему Worker3 не купит VIP этому боту (гейт: прогрет, баланс); None — можно звать."""
+    if not doc.get('mm2_trade_access'):
+        return 'бот не прогрет (mm2_trade_access)'
+    if (doc.get('robux_balance') or 0) < min_balance:
+        return f'баланс {doc.get("robux_balance") or 0} R$ < {min_balance}'
+    return None
+
+
+def buy_vip_for_prod(coll, doc):
+    """Купить VIP боту в проде через Worker3. -> None (куплен) или текст, почему нет.
+
+    Гейт Worker3 пускает только status=unready и после покупки ставит ready, поэтому на время
+    вызова переводим бота prod -> unready и в finally возвращаем prod (решение Алексея 14.10).
+    Окно ~5-15 с: ротатор в нём может принять бота за запас и залить — его POST /bots вернёт
+    BOT_ALREADY_EXISTS, и ротатор сам поставит prod. Тикеты бота гейт тоже смотрит -> skipped."""
+    if not config.VIP_API_KEY:
+        return 'VIP_API_KEY не задан'
+    gate = vip_gate_problem(doc, config.VIP_MIN_BALANCE)
+    if gate:
+        return f'Worker3 не купит: {gate}'
+    if not coll.update_one({'_id': doc['_id'], 'status': 'prod'},
+                           {'$set': {'status': 'unready'}}).modified_count:
+        return f'статус бота {doc.get("status")}, не prod — не трогаю'
+    try:
+        r = requests.post(config.VIP_HUB_URL, json={'usernames': [doc['username']]},
+                          headers={'API-KEY': config.VIP_API_KEY}, timeout=config.VIP_TIMEOUT_SEC)
+        data = r.json() if r.ok else {}
+        logging.info('buy-vip %s: %s %s', doc['username'], r.status_code, r.text[:300])
+    except Exception as e:
+        return f'Worker3: {e!r}'[:200]
+    finally:
+        coll.update_one({'_id': doc['_id'], 'status': {'$in': ['unready', 'ready']}},
+                        {'$set': {'status': 'prod'}})
+    if any(x.get('ok') for x in data.get('results') or []):
+        return None
+    return f'Worker3 не купил: {(data.get("skipped") or data.get("results") or r.text[:200])}'
 
 
 def repair_private(client, b, name):
     """NO_ACCESS_TO_PRVT_SERVER -> заново шлём в прод VIP-ссылку и код приватки из записи свопа
     (repair с private_server_link + access_code, кука не трогается). MM2 — только при живом VIP
-    (vip_server_until в будущем): с истёкшим сервером чинить нечем, алерт. Adopt — как есть."""
+    (vip_server_until в будущем): истёк — алерт; не куплен — покупаем (buy_vip_for_prod) и
+    чиним новой ссылкой. Adopt — как есть."""
     g = game_of(b)
     rid = b['roblox_account_id']
-    doc = None
+    doc, coll, bought = None, None, False
     if g.get('collection'):
-        doc = client[config.MONGO_DB][g['collection']].find_one(
-            {'roblox_id': {'$in': [int(rid), str(rid)]}},
-            {'roblox_link': 1, 'access_code': 1, 'vip_server_until': 1})
+        coll = client[config.MONGO_DB][g['collection']]
+        doc = coll.find_one({'roblox_id': {'$in': [int(rid), str(rid)]}}, PRVT_FIELDS)
     why = prvt_problem(doc, g.get('vip_required'), datetime.utcnow())
+    if why == VIP_NOT_BOUGHT:
+        if time.time() - _vip_tried.get(b['bot_id'], 0) < config.PRVT_REPAIR_COOLDOWN_SEC:
+            return  # покупать пробовали меньше часа назад, алерт уже был
+        _vip_tried[b['bot_id']] = time.time()
+        fail = buy_vip_for_prod(coll, doc)
+        if fail:
+            why = f'{VIP_NOT_BOUGHT}, купить не вышло: {fail}'
+        else:
+            bought = True
+            mon.send_event(name, 'bot_vip_bought', ev(b))
+            doc = coll.find_one({'_id': doc['_id']}, PRVT_FIELDS)
+            why = prvt_problem(doc, g.get('vip_required'), datetime.utcnow())
     if why:
         mon.send_event(name, 'bot_bad_private', ev(b, reason=why))
         _alert_once(config.REASON_NO_PRVT, b.get('bot_id'), 'general',
@@ -188,9 +245,10 @@ def repair_private(client, b, name):
                 'access_code': doc['access_code']}]):
         _prvt_repaired[b['bot_id']] = time.time()
         until = doc.get('vip_server_until')
-        mon.send_event(name, 'bot_private_repaired', ev(b))
-        tg.send_message(f'{tag(b)} <b>{name}</b> нет доступа к приватке — переотправили VIP-ссылку и код'
-                        + (f' (VIP до {until:%d.%m})' if until else ''), 'general')
+        mon.send_event(name, 'bot_private_repaired', ev(b, vip_bought=bought))
+        tg.send_message(f'{tag(b)} <b>{name}</b> нет доступа к приватке — '
+                        + ('купили VIP и отправили' if bought else 'переотправили')
+                        + ' VIP-ссылку и код' + (f' (VIP до {until:%d.%m})' if until else ''), 'general')
 
 
 def handle_broken(client, b):
@@ -424,6 +482,10 @@ def selfcheck():
     assert prvt_problem(link, True, now) == 'VIP не куплен'
     assert prvt_problem(link, None, now) is None, 'Adopt: срока нет — чиним'
     assert prvt_problem({'roblox_link': 'l'}, None, now) and prvt_problem(None, None, now)
+    assert prvt_problem({'username': 'u'}, True, now) == VIP_NOT_BOUGHT, 'не куплен — покупаем и без ссылки'
+    assert vip_gate_problem({'mm2_trade_access': True, 'robux_balance': 30}, 30) is None
+    assert 'баланс 12' in vip_gate_problem({'mm2_trade_access': True, 'robux_balance': 12}, 30)
+    assert 'прогрет' in vip_gate_problem({'robux_balance': 99}, 30)
     # игра бота: метка в телеграм, stage в Grafana; незнакомая — общий STAGE
     mm2, adopt = config.GAMES[4], config.GAMES[0]   # метки из конфига: у копии IS свои
     assert ev({'game': 4}, mode='x') == {'stage': mm2['stage'], 'game': mm2['label'], 'mode': 'x'}

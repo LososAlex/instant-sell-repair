@@ -65,7 +65,15 @@ GAMES = {
     0: {'label': 'IS Adopt', 'stage': 'adopt-instant-sell-production'},
 }
 # Починили приватку, а бот снова без доступа раньше этого срока -> не чиним по кругу, алерт.
+# Тот же срок — между попытками купить VIP одному боту.
 PRVT_REPAIR_COOLDOWN_SEC = 3600
+
+# Worker3: покупка VIP боту в проде, у которого его нет (NO_ACCESS_TO_PRVT_SERVER, vip_required).
+# Пустой VIP_API_KEY = не покупаем, только алерт. Гейт Worker3 — см. repair_worker.buy_vip_for_prod.
+VIP_HUB_URL = 'http://135.181.215.228:5000/mm2/buy-vip'
+VIP_API_KEY = os.environ.get('VIP_API_KEY', '')  # заголовок API-KEY, тот же ключ, что у ротатора
+VIP_TIMEOUT_SEC = 120     # ручка синхронная, 5-15 с на бота
+VIP_MIN_BALANCE = 30      # гейт Worker3: robux_balance >= 30
 
 # Телеграм-алерты. Пустой токен = уведомления выключены.
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')

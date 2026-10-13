@@ -71,7 +71,15 @@ Adopt — `adopt_swap`; по `roblox_id`) и шлём `PATCH /bots/repair` с `p
 
 - **MM2** (`vip_required`): чиним, только если VIP куплен и не истёк (`vip_server_until` в будущем). Сервер
   покупает Worker3 и пишет ссылку, код и срок именно в `mm2_swap` (с `accounts_p2p` они не совпадают).
-  VIP не куплен или истёк → не чиним, алерт в `general` «нужна докупка». Сами VIP не покупаем.
+  VIP истёк → не чиним, алерт в `general` «нужна докупка».
+- **MM2, VIP не куплен** → покупаем через Worker3 (`POST /mm2/buy-vip` по нику, `VIP_API_KEY` в `.env`) и чиним
+  новой ссылкой. Гейт Worker3 пускает только `status = unready` и после покупки ставит `ready`, поэтому на время
+  вызова бот в `mm2_swap` переводится `prod → unready` (атомарно, только если был `prod`), а в `finally` при любом
+  исходе — обратно в `prod` (решение Алексея 14.10). Окно ~5–15 с: ротатор в нём может принять бота за запас и
+  залить — его `POST /bots` вернёт `BOT_ALREADY_EXISTS`, и ротатор сам поставит `prod`. До переключения проверяем
+  гейт сами (`mm2_trade_access`, `robux_balance >= 30`), не проходит — статус не трогаем, алерт. Покупку одному
+  боту пробуем не чаще раза в `PRVT_REPAIR_COOLDOWN_SEC`. Пустой `VIP_API_KEY` — не покупаем, алерт.
+  На 14.10 у всех 531 MM2-бота в проде VIP куплен — ветка на будущее.
 - **Adopt**: VIP из реги, срока нет — чиним той же ссылкой и кодом.
 - Нет записи, ссылки или кода → алерт, не чиним. У IS Adopt коллекции нет — только алерт.
 - Против петли: если бот снова без доступа раньше `PRVT_REPAIR_COOLDOWN_SEC` (час) после переотправки — не
@@ -122,6 +130,7 @@ Adopt — `adopt_swap`; по `roblox_id`) и шлём `PATCH /bots/repair` с `p
 | `POLL_INTERVAL_SEC` | Пауза между опросами, сек (600 = 10 мин) |
 | `REQUEST_TIMEOUT_SEC` | Таймаут HTTP-запросов, сек |
 | `MAX_REPAIR_ATTEMPTS` | Подряд неудачных авто-починок (`!=200`) до эскалации в тикет (3) |
+| `VIP_HUB_URL` / `VIP_API_KEY` / `VIP_TIMEOUT_SEC` / `VIP_MIN_BALANCE` | Worker3 для покупки VIP боту в проде без VIP; пустой ключ — не покупаем |
 | `GAMES[*].collection` / `vip_required`, `PRVT_REPAIR_COOLDOWN_SEC` | Откуда брать VIP-ссылку и код для `NO_ACCESS_TO_PRVT_SERVER`, нужен ли живой VIP; пауза против петли (3600 с) |
 | `SWAPS_PG_DSN` / `CAPTCHA_EMPTY_TYPES` | Postgres бэка (число предметов) / типы, которые списываем при капче и 0 предметов. Пустой DSN = шаг выключен |
 
@@ -142,7 +151,8 @@ Adopt — `adopt_swap`; по `roblox_id`) и шлём `PATCH /bots/repair` с `p
 | `bot_broken_refresh` (`reason=cookies<2`) | Завели тикет на регенерацию кук |
 | `bot_in_roblox_captcha` | Завели тикет на капчу |
 | `bot_not_found_mongo` | Бот из `/broken` не найден в `accounts_p2p` |
-| `bot_private_repaired` | Переотправили VIP-ссылку и код приватки (`NO_ACCESS_TO_PRVT_SERVER`) |
+| `bot_private_repaired` (`vip_bought`) | Переотправили VIP-ссылку и код приватки (`NO_ACCESS_TO_PRVT_SERVER`); `vip_bought=true` — перед этим купили VIP |
+| `bot_vip_bought` | Купили VIP боту MM2 в проде через Worker3 |
 | `bot_bad_private` (`reason=…`) | Нет доступа к приватке, не чиним: VIP истёк / не куплен / нет ссылки |
 
 Имена `event_type` совпадают с ФС, чтобы переиспользовать готовые панели/запросы.
