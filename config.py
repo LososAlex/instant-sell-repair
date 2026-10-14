@@ -57,12 +57,13 @@ STAGE = 'production'    # для бота незнакомой игры; ина�
 # /broken отдаёт ботов ВСЕХ игр свопа. По game бота (число enum Games) — метка в телеграм и
 # stage в Grafana, тот же, что у ротатора этой игры (на сервере mm2: 'mm2-swap-production').
 # collection / vip_required — для починки NO_ACCESS_TO_PRVT_SERVER (см. config свопа). Записи IS
-# лежат в той же mm2_swap (service = instant_sell). У IS Adopt коллекции нет — только алерт.
+# лежат в той же mm2_swap (service = instant_sell). IS Adopt с 14.10 — в adopt_swap, как своп Adopt.
 GAMES = {
     # метка с IS — чтобы не спутать со свопом
     4: {'label': 'IS MM2', 'stage': 'mm2-instant-sell-production', 'service': 'Instant-sell_mm2',
         'collection': 'mm2_swap', 'vip_required': True},
-    0: {'label': 'IS Adopt', 'stage': 'adopt-instant-sell-production'},
+    0: {'label': 'IS Adopt', 'stage': 'adopt-instant-sell-production', 'service': 'Instant-sell_adopt',
+        'collection': 'adopt_swap'},
 }
 # Починили приватку, а бот снова без доступа раньше этого срока -> не чиним по кругу, алерт.
 # Тот же срок — между попытками купить VIP одному боту.
