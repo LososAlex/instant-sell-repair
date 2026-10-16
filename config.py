@@ -31,8 +31,8 @@ REASON_NO_PRVT = 'NO_ACCESS_TO_PRVT_SERVER'   # нет доступа к при�
 
 COOKIE_REASONS = [None, 'TRADE_INVALID_BOT_COOKIE']  # штатный слом -> починка по кукам (диспатч по state)
 CAPTCHA_REASONS = ['TRADE_CAPTCHA_ERROR']            # капча -> тикет на ручную починку
-REASON_NO_LICENSE = 'TRADE_NO_LICENSE'  # нет трейд-лицензии; пустой Adopt -> DEAD (см. ниже). В REPAIR_ONLY его нет
-REPAIR_ONLY_REASONS = ['STARTUP_FAILED', 'TRADE_NO_NEEDED_ITEMS_ON_BOT']  # просто дёрнуть /repair с bot_id, без кук
+REASON_NO_LICENSE = 'TRADE_NO_LICENSE'  # нет трейд-лицензии; пустой Adopt -> DEAD (см. ниже), иначе repair
+REPAIR_ONLY_REASONS = ['STARTUP_FAILED', 'TRADE_NO_NEEDED_ITEMS_ON_BOT', REASON_NO_LICENSE]  # просто дёрнуть /repair с bot_id, без кук
 
 SKIP_REASONS = []  # не поломка бота (бизнес-причина) -> пропуск без действий; сюда добавлять новые
 
