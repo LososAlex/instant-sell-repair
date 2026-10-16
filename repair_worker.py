@@ -335,6 +335,30 @@ def mark_dead(b):
     return r.status_code == 200
 
 
+def exit_code(reason, b):
+    """exit_reason для accounts_p2p: замодерен -> moderated; капча -> captcha_empty, если у бота
+    не было ни одной успешной сделки (пустой с рождения), иначе captcha."""
+    if reason != rq.REASON_CAPTCHA:
+        return reason
+    conn = psycopg2.connect(config.SWAPS_PG_DSN)
+    try:
+        cur = conn.cursor()
+        cur.execute("select 1 from trades where bot_id = %s and status = 'SUCCESS' limit 1", (b['bot_id'],))
+        return 'captcha' if cur.fetchone() else 'captcha_empty'
+    finally:
+        conn.close()
+
+
+def set_exit(client, b, exit_reason):
+    """Причина конца жизни — раз за жизнь бота, как service; по ней считают потери на выходе в прод.
+    Только запись выданного бота (есть service): у roblox_id бывают дубли в пуле."""
+    rid = b['roblox_account_id']
+    cookies_col(client).update_many(
+        {'roblox_id': {'$in': [int(rid), str(rid)]}, 'service': {'$exists': True},
+         'exit_reason': {'$exists': False}},
+        {'$set': {'exit_reason': exit_reason, 'exit_at': datetime.utcnow()}})
+
+
 def dead_batch(client, hits, total, reason, title):
     """hits -> DEAD, их незакрытые тикеты reason закрываем (resolved). total — кандидатов
     всего: сверх предохранителя пишем в general. Откат DEAD — PATCH /bots/repair.
@@ -346,6 +370,7 @@ def dead_batch(client, hits, total, reason, title):
     for b in hits:
         name = b.get('roblox_nickname')
         try:
+            exit_reason = exit_code(reason, b)  # до DEAD: упадёт БД — бот не спишется в этот цикл
             ok = mark_dead(b)
         except Exception as e:
             logging.error('dead %s: %r', name, e)
@@ -356,8 +381,9 @@ def dead_batch(client, hits, total, reason, title):
                         f'см. logs/repair.log')
             continue
         dead.append(b)
+        set_exit(client, b, exit_reason)
         rq.resolve_open(client, reason, name, f'bot DEAD in swap prod ({reason}) by swap repair-worker')
-        mon.send_event(name, 'bot_dead', ev(b, reason=reason, type=b.get('type')))
+        mon.send_event(name, 'bot_dead', ev(b, reason=reason, type=b.get('type'), exit_reason=exit_reason))
     if dead:
         tg.send_message(f'{title} → DEAD ({len(dead)}):\n'
                         + ''.join(f'{tag(b)} <b>{b.get("roblox_nickname")}</b>\n' for b in dead),
@@ -460,6 +486,7 @@ def tick(client):
 
 
 def selfcheck():
+    assert exit_code(rq.REASON_MODERATED, {}) == 'moderated', 'модерация — без запроса к БД'
     bots = [{'roblox_nickname': 'a', 'type': 'INVENTORY'}, {'roblox_nickname': 'b', 'type': 'TRADE'},
             {'roblox_nickname': 'c', 'type': 'INVENTORY'}]
     assert pick_moderated(bots, {'a', 'b'}, 20) == ([bots[0]], 1), 'TRADE не списываем'
