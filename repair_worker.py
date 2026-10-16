@@ -3,6 +3,7 @@
 Каждый цикл: GET /bots/broken ->
   сначала INVENTORY с незакрытым тикетом moderated -> DEAD (kill_moderated, ключ CV),
   потом TRADE/INVENTORY с капчей и 0 предметов -> DEAD (kill_captcha_empty, ключ CV + БД бэка),
+  потом Adopt с TRADE_NO_LICENSE и 0 предметов -> DEAD (kill_no_license_empty, то же),
   их дальше не чиним; по остальным ботам (как в прод-ФС):
   - есть активный тикет (queued/in_progress) -> пропуск, его чинят;
   - последний тикет fixed (воркер починки обновил accounts_p2p) -> до-применяем repair:
@@ -440,6 +441,30 @@ def kill_captcha_empty(client, bots):
     return dead_batch(client, hits, total, rq.REASON_CAPTCHA, 'Капча, 0 предметов')
 
 
+def pick_no_license_empty(bots, empty, cap):
+    """Кого списать: reason TRADE_NO_LICENSE, игра из NO_LICENSE_EMPTY_GAMES, 0 предметов
+    (roblox_account_id в empty), только CAPTCHA_EMPTY_TYPES. -> (до cap ботов, кандидатов всего)."""
+    hits = [b for b in bots
+            if b.get('reason') == config.REASON_NO_LICENSE
+            and b.get('game') in config.NO_LICENSE_EMPTY_GAMES
+            and b.get('type') in config.CAPTCHA_EMPTY_TYPES
+            and str(b.get('roblox_account_id')) in empty]
+    return hits[:cap], len(hits)
+
+
+def kill_no_license_empty(client, bots):
+    """Adopt без трейд-лицензии + 0 предметов -> DEAD (Алексей, 16.10): торговать не может, стока
+    нет — терять нечего, а BROKEN держит место в лимите парка. С предметами — repair, как раньше.
+    Тикетов на эту поломку нет, exit_reason — no_license. Возвращает bot_id списанных."""
+    if not (config.CV_KEY and config.SWAPS_PG_DSN):
+        return set()
+    rids = {str(b.get('roblox_account_id')) for b in bots if b.get('reason') == config.REASON_NO_LICENSE}
+    if not rids:
+        return set()
+    hits, total = pick_no_license_empty(bots, empty_bots(rids), config.MAX_DEAD_PER_TICK)
+    return dead_batch(client, hits, total, 'no_license', 'Adopt без лицензии, 0 предметов')
+
+
 _prev_broken = set()
 
 
@@ -471,7 +496,7 @@ def tick(client):
         logging.info('брокенов нет')
         return
     dead = set()
-    for kill in (kill_moderated, kill_captcha_empty):
+    for kill in (kill_moderated, kill_captcha_empty, kill_no_license_empty):
         try:
             dead |= kill(client, [b for b in bots if b.get('bot_id') not in dead])
         except Exception as e:  # списание не должно ломать починку остальных
@@ -502,6 +527,16 @@ def selfcheck():
     assert pick_captcha_empty(cb, {'d'}, empty, 20) == ([cb[0], cb[3]], 2)
     assert pick_captcha_empty(cb, {'d'}, empty, 1) == ([cb[0]], 2), 'предохранитель'
     assert pick_captcha_empty(cb, set(), set(), 20) == ([], 0)
+    # без лицензии + 0 предметов: только Adopt; MM2, VETERAN, с предметами и другой reason не трогаем
+    nl = [{'roblox_account_id': '1', 'type': 'TRADE', 'game': 0, 'reason': 'TRADE_NO_LICENSE'},
+          {'roblox_account_id': '2', 'type': 'TRADE', 'game': 0, 'reason': 'TRADE_NO_LICENSE'},
+          {'roblox_account_id': '3', 'type': 'TRADE', 'game': 4, 'reason': 'TRADE_NO_LICENSE'},
+          {'roblox_account_id': '4', 'type': 'VETERAN', 'game': 0, 'reason': 'TRADE_NO_LICENSE'},
+          {'roblox_account_id': '5', 'type': 'TRADE', 'game': 0, 'reason': 'TRADE_CAPTCHA_ERROR'},
+          {'roblox_account_id': '6', 'type': 'INVENTORY', 'game': 0, 'reason': 'TRADE_NO_LICENSE'}]
+    assert pick_no_license_empty(nl, {'1', '3', '4', '5', '6'}, 20) == ([nl[0], nl[5]], 2)
+    assert pick_no_license_empty(nl, {'1', '6'}, 1) == ([nl[0]], 2), 'предохранитель'
+    assert exit_code('no_license', {}) == 'no_license', 'без запроса к БД'
     # приватка: MM2 чиним только с живым VIP, Adopt — с тем, что есть
     now, link = datetime(2026, 10, 14), {'roblox_link': 'l', 'access_code': 'c'}
     assert prvt_problem({**link, 'vip_server_until': datetime(2026, 12, 1)}, True, now) is None

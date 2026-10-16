@@ -31,6 +31,7 @@ REASON_NO_PRVT = 'NO_ACCESS_TO_PRVT_SERVER'   # нет доступа к при�
 
 COOKIE_REASONS = [None, 'TRADE_INVALID_BOT_COOKIE']  # штатный слом -> починка по кукам (диспатч по state)
 CAPTCHA_REASONS = ['TRADE_CAPTCHA_ERROR']            # капча -> тикет на ручную починку
+REASON_NO_LICENSE = 'TRADE_NO_LICENSE'  # нет трейд-лицензии; пустой Adopt -> DEAD (см. ниже). В REPAIR_ONLY его нет
 REPAIR_ONLY_REASONS = ['STARTUP_FAILED', 'TRADE_NO_NEEDED_ITEMS_ON_BOT']  # просто дёрнуть /repair с bot_id, без кук
 
 SKIP_REASONS = []  # не поломка бота (бизнес-причина) -> пропуск без действий; сюда добавлять новые
@@ -45,6 +46,9 @@ MAX_DEAD_PER_TICK = 20  # предохранитель от массового �
 # этого бэка (прод-БД IS). Пустой SWAPS_PG_DSN (или CV_KEY) = не списываем. VETERAN не трогаем.
 SWAPS_PG_DSN = os.environ.get('SWAPS_PG_DSN', '')
 CAPTCHA_EMPTY_TYPES = ('TRADE', 'INVENTORY')
+# Списание пустых без трейд-лицензии (с 2026-10-16): reason TRADE_NO_LICENSE + 0 предметов -> DEAD,
+# только эти игры (0 — Adopt). Типы, ключи и предохранитель — те же, что у капчи.
+NO_LICENSE_EMPTY_GAMES = (0,)
 
 # reason не из KNOWN_REASONS -> считаем новым, разово алертим в general.
 KNOWN_REASONS = (COOKIE_REASONS + CAPTCHA_REASONS + REPAIR_ONLY_REASONS
