@@ -1,7 +1,7 @@
 """Воркер починки ботов mm2-swap с тикет-системой (repair_queue).
 
 Каждый цикл: GET /bots/broken ->
-  сначала INVENTORY с незакрытым тикетом moderated -> DEAD (kill_moderated, ключ CV),
+  сначала INVENTORY и пустые TRADE с незакрытым тикетом moderated -> DEAD (kill_moderated, ключ CV),
   потом TRADE/INVENTORY с капчей и 0 предметов -> DEAD (kill_captcha_empty, ключ CV + БД бэка),
   потом Adopt с TRADE_NO_LICENSE и 0 предметов -> DEAD (kill_no_license_empty, то же),
   их дальше не чиним; по остальным ботам (как в прод-ФС):
@@ -321,11 +321,13 @@ def handle_broken(client, b):
         logging.info('пропуск, неизвестный state: %s %s', state, b.get('bot_id'))
 
 
-def pick_moderated(bots, moderated, cap):
-    """Кого списать: INVENTORY из /broken, чей ник в moderated (незакрытый тикет).
-    TRADE не трогаем — на нём сток. -> (до cap ботов, сколько кандидатов всего)."""
-    hits = [b for b in bots
-            if b.get('type') == 'INVENTORY' and b.get('roblox_nickname') in moderated]
+def pick_moderated(bots, moderated, empty, cap):
+    """Кого списать: бот из /broken, чей ник в moderated (незакрытый тикет): INVENTORY — всегда,
+    TRADE — только пустой (roblox_account_id в empty, Алексей 19.10): с предметами на нём сток.
+    -> (до cap ботов, сколько кандидатов всего)."""
+    hits = [b for b in bots if b.get('roblox_nickname') in moderated
+            and (b.get('type') == 'INVENTORY'
+                 or b.get('type') == 'TRADE' and str(b.get('roblox_account_id')) in empty)]
     return hits[:cap], len(hits)
 
 
@@ -395,12 +397,16 @@ def dead_batch(client, hits, total, reason, title):
 def kill_moderated(client, bots):
     """Замодеренный аккаунт не чинится ничем, а BROKEN держит место в лимите парка —
     ротатор не может залить замену. Поэтому DEAD. Стока у INVENTORY нет (01.10: 0 штук
-    на 180 живых). Возвращает bot_id списанных."""
+    на 180 живых); TRADE — только пустой, проверка по БД бэка (без SWAPS_PG_DSN — только
+    INVENTORY). Возвращает bot_id списанных."""
     if not config.CV_KEY:
         return set()
     moderated = rq.open_tickets(client, rq.REASON_MODERATED, {b.get('roblox_nickname') for b in bots})
-    hits, total = pick_moderated(bots, moderated, config.MAX_DEAD_PER_TICK)
-    return dead_batch(client, hits, total, rq.REASON_MODERATED, 'Замодеренные INVENTORY')
+    rids = {str(b.get('roblox_account_id')) for b in bots
+            if b.get('type') == 'TRADE' and b.get('roblox_nickname') in moderated}
+    empty = empty_bots(rids) if rids and config.SWAPS_PG_DSN else set()
+    hits, total = pick_moderated(bots, moderated, empty, config.MAX_DEAD_PER_TICK)
+    return dead_batch(client, hits, total, rq.REASON_MODERATED, 'Замодеренные (INVENTORY и пустые TRADE)')
 
 
 def empty_bots(rids):
@@ -514,9 +520,12 @@ def selfcheck():
     assert exit_code(rq.REASON_MODERATED, {}) == 'moderated', 'модерация — без запроса к БД'
     bots = [{'roblox_nickname': 'a', 'type': 'INVENTORY'}, {'roblox_nickname': 'b', 'type': 'TRADE'},
             {'roblox_nickname': 'c', 'type': 'INVENTORY'}]
-    assert pick_moderated(bots, {'a', 'b'}, 20) == ([bots[0]], 1), 'TRADE не списываем'
-    assert pick_moderated(bots, {'a', 'c'}, 1) == ([bots[0]], 2), 'предохранитель'
-    assert pick_moderated(bots, set(), 20) == ([], 0)
+    bots = [{**b, 'roblox_account_id': str(i)} for i, b in enumerate(bots)]
+    assert pick_moderated(bots, {'a', 'b'}, set(), 20) == ([bots[0]], 1), 'TRADE с предметами не списываем'
+    assert pick_moderated(bots, {'a', 'b'}, {'1'}, 20) == (bots[:2], 2), 'пустой TRADE списываем'
+    assert pick_moderated(bots, {'a'}, {'1'}, 20) == ([bots[0]], 1), 'без тикета не трогаем'
+    assert pick_moderated(bots, {'a', 'c'}, set(), 1) == ([bots[0]], 2), 'предохранитель'
+    assert pick_moderated(bots, set(), {'0', '1', '2'}, 20) == ([], 0)
     # капча + 0 предметов: reason или тикет по нику; VETERAN и боты с предметами не трогаем
     cb = [{'roblox_account_id': '1', 'type': 'TRADE', 'reason': 'TRADE_CAPTCHA_ERROR'},
           {'roblox_account_id': '2', 'type': 'TRADE', 'reason': 'TRADE_CAPTCHA_ERROR'},
