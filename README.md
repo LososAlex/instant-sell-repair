@@ -102,8 +102,9 @@ Adopt — `adopt_swap`; по `roblox_id`) и шлём `PATCH /bots/repair` с `p
 ### Гейт not-approved перед каждым repair (с 13.11)
 
 `repair` возвращает бота в прод, поэтому перед **каждым** вызовом (автопочинка кукой, `fixed`-тикет куки и
-капчи, приватка, `REPAIR_ONLY_REASONS`) бот проверяется ручкой `GET usermoderation.roblox.com/v2/not-approved`
-(`nap_gate.py`, функция `alive`). Спека и итог A/B-теста — [ручка not-approved v2](https://claude.ai/artifact/DGsDyFdMfE8zykPNpu1VQA).
+капчи, приватка) бот проверяется ручкой `GET usermoderation.roblox.com/v2/not-approved`
+(`nap_gate.py`, функция `alive`). `REPAIR_ONLY_REASONS` (`STARTUP_FAILED`, `TRADE_NO_NEEDED_ITEMS_ON_BOT`,
+`TRADE_NO_LICENSE`) — без гейта (Алексей, 14.11): кука не ломалась, бот просто не запустился. Спека и итог A/B-теста — [ручка not-approved v2](https://claude.ai/artifact/DGsDyFdMfE8zykPNpu1VQA).
 
 - Запрос защищённый, как в тесте: лицо профиля реги (`accounts_p2p.reg_info.data.fingerprint`), `curl_cffi`
   impersonate chrome, свой прокси бота (`accounts_p2p.proxy` → `dedicated-servers.group_proxies`, ключ

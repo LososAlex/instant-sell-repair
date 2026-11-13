@@ -102,7 +102,7 @@ def proxies_col():
 def alive(client, b, _id, name, action, cookie=None):
     """Гейт not-approved перед возвратом бота в прод (любой repair). -> результат nap_gate.gate:
     outcome 'clean' — чинить, в repair слать res['cookie'] (при ротации — новая). cookie — та, что
-    уходит в repair; repair без куки (капча, приватка, STARTUP_FAILED...) пробуем свежей cookies[0]
+    уходит в repair; repair без куки (капча, приватка) пробуем свежей cookies[0]
     из accounts_p2p: блокировка — на весь аккаунт.
     restricted -> в прод не возвращаем (Алексей, 13.11: «в проде починку не делаем, бот уходит в
     обычный путь удаления»): exit_reason locked/moderated + тикет moderated -> следующим циклом
@@ -344,14 +344,16 @@ def handle_broken(client, b):
         logging.info('нет доступа к приват-серверу: %s', name)
         repair_private(client, b, name)
         return
+    if reason in config.REPAIR_ONLY_REASONS:
+        # не кука: бот не запустился, нет нужных предметов или лицензии — repair без кук и без гейта
+        # not-approved: аккаунт тот же, что и был в проде (Алексей, 14.11)
+        repair([{'bot_id': b['bot_id']}])  # просто дёргаем ручку без кук
+        return
+
     # дальше — нужна запись accounts_p2p: гейту (лицо, прокси, кука) и починке по кукам / капчей
     rid = b['roblox_account_id']
     # roblox_id в mongo хранится числом; /broken отдаёт строку -> матчим оба типа
     doc = cookies_col(client).find_one({'roblox_id': {'$in': [int(rid), str(rid)]}})
-    if doc and reason in config.REPAIR_ONLY_REASONS:
-        if alive(client, b, doc['_id'], doc.get('username') or name, f'repair {reason}')['outcome'] == 'clean':
-            repair([{'bot_id': b['bot_id']}])  # просто дёргаем ручку без кук
-        return
     if not doc:
         logging.warning('нет в accounts_p2p: %s', b.get('roblox_account_id'))
         mon.send_event(name, 'bot_not_found_mongo', ev(b, roblox_id=str(b.get('roblox_account_id'))))
