@@ -1,3 +1,4 @@
 requests
 pymongo
 psycopg2-binary
+curl_cffi==0.16.3

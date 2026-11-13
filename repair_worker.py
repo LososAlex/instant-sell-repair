@@ -23,6 +23,11 @@
 Куки берём из accounts_p2p. Прод-uuid для /repair берём из /broken (поле bot_id).
 enable после repair НЕ делаем — это сторона бэка. Логи -> logs/repair.log (ротация).
 Настройки — config.py, тикеты — repair_queue.py.
+
+Гейт not-approved (nap_gate.py, с 2026-11-13): перед КАЖДЫМ repair (бот возвращается в прод)
+бот проверяется ручкой usermoderation v2/not-approved через свой прокси (alive). clean — чиним;
+блокировка/бан — в прод не возвращаем: exit_reason locked/moderated + тикет moderated, дальше
+обычный путь kill_moderated; прочее — не чиним в этот проход. Не clean -> событие в Grafana.
 """
 import logging
 import os
@@ -38,10 +43,12 @@ import requests
 import command_bot as cmd
 import config
 import monitoring as mon
+import nap_gate
 import notifications as tg
 import repair_queue as rq
 
 HEADERS = {'x-bots-admin-key': config.ADMIN_KEY}
+_PROXIES = {}
 
 # bot _id -> число подряд неудачных авто-починок (repair != 200). В памяти процесса.
 _repair_attempts = {}
@@ -86,11 +93,54 @@ def tag(b):
     return f'[{game_of(b)["label"]}]'
 
 
+def proxies_col():
+    if 'c' not in _PROXIES:
+        _PROXIES['c'] = pymongo.MongoClient(config.PROXY_MONGO_URI)[config.PROXY_DB][config.PROXY_COLLECTION]
+    return _PROXIES['c']
+
+
+def alive(client, b, _id, name, action, cookie=None):
+    """Гейт not-approved перед возвратом бота в прод (любой repair). -> результат nap_gate.gate:
+    outcome 'clean' — чинить, в repair слать res['cookie'] (при ротации — новая). cookie — та, что
+    уходит в repair; repair без куки (капча, приватка, STARTUP_FAILED...) пробуем свежей cookies[0]
+    из accounts_p2p: блокировка — на весь аккаунт.
+    restricted -> в прод не возвращаем (Алексей, 13.11: «в проде починку не делаем, бот уходит в
+    обычный путь удаления»): exit_reason locked/moderated + тикет moderated -> следующим циклом
+    kill_moderated (INVENTORY и пустой TRADE -> DEAD; TRADE со стоком — DeadModeratedByList руками).
+    Прочее (сеть, прокси, нет лица, 401, пауза) — не чиним в этот проход, гейт кэширует исход на час."""
+    if not config.PROXY_MONGO_URI:
+        return {'outcome': 'no_proxy_config', 'cookie': None, 'cached': True}   # fail-closed, алерт — в tick
+    if cookie is None:
+        cookie = ((cookies_col(client).find_one({'_id': _id}, {'cookies': 1}) or {}).get('cookies') or [None])[0]
+    g = game_of(b)
+    also = (client[config.MONGO_DB][g['collection']],) if g.get('collection') else ()
+    res = nap_gate.gate(cookies_col(client), proxies_col(), _id, cookie, action,
+                        g.get('target') or f'{g["label"]} prod',
+                        lambda n, t, p: mon.send_event(n, t, ev(b, **p)), also=also)
+    if res['outcome'] == 'clean':
+        return res
+    logging.warning('nap gate: %s %s -> %s, не чиним', name, action, res['reason'])
+    if res['write_off']:
+        cookies_col(client).update_one({'_id': _id, 'exit_reason': {'$exists': False}},
+                                       {'$set': nap_gate.exit_fields(res)})
+        rq.create_ticket(client, _id, name, rq.REASON_MODERATED, g.get('service'))
+        _alert_once('nap_restricted', b.get('bot_id'), 'general',
+                    f'{tag(b)} <b>{name}</b> {res["reason"]} — в прод не возвращаем, тикет moderated '
+                    f'(INVENTORY и пустой TRADE уйдут в DEAD следующим циклом)')
+    elif res['outcome'] in nap_gate.PAUSE and not res['cached']:
+        tg.send_message(f'⚠️ Гейт not-approved: {res["outcome"]} на {tag(b)} <b>{name}</b> — все проверки '
+                        f'на паузе {nap_gate.PAUSE[res["outcome"]] // 60} мин, ботов в прод не возвращаем',
+                        'general')
+    return res
+
+
 def apply_fixed(client, b, doc, ticket, name):
     """Тикет fixed: воркер починки обновил accounts_p2p -> до-применяем repair.
     После успеха тикет -> resolved (и капча, и куки), чтобы повторный слом
     трактовался как свежий инцидент, а не зацикливал применение старого тикета."""
     if ticket.get('reason') == rq.REASON_CAPTCHA:
+        if alive(client, b, doc['_id'], name, 'repair_captcha')['outcome'] != 'clean':
+            return
         if repair([{'bot_id': b['bot_id']}]):  # капча: без данных
             rq.resolve_ticket(client, ticket['_id'])
             mon.send_event(name, 'bot_captcha_repaired', ev(b, mode='ticket_fixed'))
@@ -100,7 +150,10 @@ def apply_fixed(client, b, doc, ticket, name):
     if not cookies:
         logging.warning('тикет fixed, но cookies пусты: %s', name)
         return
-    if repair([{'bot_id': b['bot_id'], 'roblox_auth': cookies[0]}]):  # свежая cookies[0]
+    res = alive(client, b, doc['_id'], name, 'repair_cookie', cookies[0])
+    if res['outcome'] != 'clean':
+        return
+    if repair([{'bot_id': b['bot_id'], 'roblox_auth': res['cookie']}]):  # свежая cookies[0]
         rq.resolve_ticket(client, ticket['_id'])  # закрываем -> повторный слом = свежий инцидент
         mon.send_event(name, 'bot_cookie_updated', ev(b, mode='ticket_fixed'))
         tg.send_message(f'{tag(b)} <b>{name}</b> тикет решён, кука обновлена в проде', 'refresh_updated')
@@ -108,12 +161,18 @@ def apply_fixed(client, b, doc, ticket, name):
 
 def auto_repair_cookie(client, b, _id, name, cookies):
     """BROKEN, cookies>=2: чиним cookies[1]. При успехе ротация. !=200 -> retry на следующих
-    циклах; после MAX_REPAIR_ATTEMPTS подряд -> алерт в general и продолжаем пробовать."""
-    if repair([{'bot_id': b['bot_id'], 'roblox_auth': cookies[1]}]):
-        cookies_col(client).update_one({'_id': _id}, {'$set': {'cookies': cookies[1:]}})
+    циклах; после MAX_REPAIR_ATTEMPTS подряд -> алерт в general и продолжаем пробовать.
+    Гейт: 401 на cookies[1] — та же неудачная попытка, что repair != 200; прочие отказы гейта
+    (блокировка, сеть, прокси) попыткой не считаем."""
+    res = alive(client, b, _id, name, 'repair_cookie', cookies[1])
+    if res['outcome'] == 'clean' and repair([{'bot_id': b['bot_id'], 'roblox_auth': res['cookie']}]):
+        # res['cookie'] — cookies[1] или её ротация (гейт уже записал её в accounts_p2p)
+        cookies_col(client).update_one({'_id': _id}, {'$set': {'cookies': [res['cookie'], *cookies[2:]]}})
         _repair_attempts.pop(_id, None)
         mon.send_event(name, 'bot_cookie_updated', ev(b, mode='auto_refresh'))
         tg.send_message(f'{tag(b)} <b>{name}</b> обновлена кука (авто, cookies[1])', 'refresh_updated')
+        return
+    if res['outcome'] not in ('clean', 'unauthorized'):
         return
     n = _repair_attempts.get(_id, 0) + 1
     logging.warning('auto-repair !=200 для %s, попытка %d/%d', name, n, config.MAX_REPAIR_ATTEMPTS)
@@ -219,9 +278,14 @@ def repair_private(client, b, name):
         coll = client[config.MONGO_DB][g['collection']]
         doc = coll.find_one({'roblox_id': {'$in': [int(rid), str(rid)]}}, PRVT_FIELDS)
     why = prvt_problem(doc, g.get('vip_required'), datetime.utcnow())
+    gated = False
     if why == VIP_NOT_BOUGHT:
         if time.time() - _vip_tried.get(b['bot_id'], 0) < config.PRVT_REPAIR_COOLDOWN_SEC:
             return  # покупать пробовали меньше часа назад, алерт уже был
+        # гейт ДО покупки: VIP боту в блокировке — минус R$ впустую
+        if alive(client, b, doc['_id'], name, 'repair_private')['outcome'] != 'clean':
+            return
+        gated = True
         _vip_tried[b['bot_id']] = time.time()
         fail = buy_vip_for_prod(coll, doc)
         if fail:
@@ -241,6 +305,8 @@ def repair_private(client, b, name):
         _alert_once('prvt_again', b.get('bot_id'), 'general',
                     f'{tag(b)} <b>{name}</b> приватку переотправили меньше часа назад, а доступа снова '
                     f'нет — проверить VIP-ссылку вручную')
+        return
+    if not gated and alive(client, b, doc['_id'], name, 'repair_private')['outcome'] != 'clean':
         return
     if repair([{'bot_id': b['bot_id'], 'private_server_link': doc['roblox_link'],
                 'access_code': doc['access_code']}]):
@@ -278,14 +344,14 @@ def handle_broken(client, b):
         logging.info('нет доступа к приват-серверу: %s', name)
         repair_private(client, b, name)
         return
-    if reason in config.REPAIR_ONLY_REASONS:
-        repair([{'bot_id': b['bot_id']}])  # просто дёргаем ручку без кук
-        return
-
-    # дальше — reason'ы с починкой по кукам / капчей: нужны mongo-док и тикет-логика
+    # дальше — нужна запись accounts_p2p: гейту (лицо, прокси, кука) и починке по кукам / капчей
     rid = b['roblox_account_id']
     # roblox_id в mongo хранится числом; /broken отдаёт строку -> матчим оба типа
     doc = cookies_col(client).find_one({'roblox_id': {'$in': [int(rid), str(rid)]}})
+    if doc and reason in config.REPAIR_ONLY_REASONS:
+        if alive(client, b, doc['_id'], doc.get('username') or name, f'repair {reason}')['outcome'] == 'clean':
+            repair([{'bot_id': b['bot_id']}])  # просто дёргаем ручку без кук
+        return
     if not doc:
         logging.warning('нет в accounts_p2p: %s', b.get('roblox_account_id'))
         mon.send_event(name, 'bot_not_found_mongo', ev(b, roblox_id=str(b.get('roblox_account_id'))))
@@ -491,7 +557,13 @@ def notify_new(bots):
     tg.send_message(txt, 'new_brokens_in_prod')
 
 
+_no_proxy_cfg = {'at': 0.0}
+
+
 def tick(client):
+    if not config.PROXY_MONGO_URI and time.time() - _no_proxy_cfg['at'] >= 3600:
+        _no_proxy_cfg['at'] = time.time()
+        tg.send_message('⚠️ PROXY_MONGO_URI не задан — гейт не пускает ботов в прод: repair не делаем', 'general')
     r = requests.get(config.API_URL + '/broken', headers=HEADERS, timeout=config.REQUEST_TIMEOUT_SEC)
     if r.status_code != 200:
         logging.error('broken: HTTP %s %s', r.status_code, r.text[:300])
@@ -563,7 +635,65 @@ def selfcheck():
     assert tag({'game': 0}) == f'[{adopt["label"]}]' and tag({'game': 7}) == '[game=7]'
     assert ev({'game': 7})['stage'] == config.STAGE
     assert game_of({'game': 4}).get('service') == mm2.get('service') and 'service' not in game_of({'game': 7})
+    gate_selfcheck()
     print('selfcheck ok')
+
+
+def gate_selfcheck():
+    """Гейт в починке без сети: блокировка -> не чиним, exit locked + тикет moderated; ротация куки ->
+    в repair и в cookies уходит новая; 401 на cookies[1] -> неудачная попытка; пустой PROXY_MONGO_URI -> стоп."""
+    class Col:
+        def __init__(self):
+            self.ups, self.ins = [], []
+
+        def find_one(self, *a, **k):
+            return None
+
+        def update_one(self, q, u):
+            self.ups.append((q, u))
+
+        def insert_one(self, d):
+            self.ins.append(d)
+
+    cols = {}
+    client = {config.MONGO_DB: type('Db', (), {'__getitem__': lambda s, k: cols.setdefault(k, Col())})()}
+    sent, calls = [], []
+    lock = {'source': 5, 'startTime': '2026-11-09T19:05:14.782Z', 'endTime': None}
+    out = {'outcome': 'restricted', 'restriction': lock}
+    saved = (nap_gate.gate, globals()['repair'], globals()['proxies_col'], tg.send_message,
+             mon.send_event, config.PROXY_MONGO_URI)
+
+    def fake_gate(acc, px, _id, cookie, action, target, send, stage=None, also=()):
+        calls.append((cookie, action, target, len(also)))
+        return {'cookie': out.get('cookie', cookie), 'action': action, 'target': target, 'cached': False,
+                'outcome': out['outcome'], 'restriction': out.get('restriction'),
+                'write_off': out['outcome'] == 'restricted',
+                'reason': nap_gate.reason_text(out['outcome'], out.get('restriction'))}
+    nap_gate.gate, globals()['proxies_col'] = fake_gate, lambda: None
+    globals()['repair'] = lambda items: sent.append(items) or True
+    tg.send_message = mon.send_event = lambda *a, **k: None
+    config.PROXY_MONGO_URI = 'x'
+    try:
+        b = {'bot_id': 'u1', 'game': 4, 'roblox_nickname': 'bot'}
+        auto_repair_cookie(client, b, 'id1', 'bot', ['c0', 'c1', 'c2'])
+        acc = cols[config.MONGO_COLLECTION]
+        assert not sent and calls[-1] == ('c1', 'repair_cookie', config.GAMES[4]['target'], 1)
+        assert acc.ups[-1][1]['$set']['exit_reason'] == 'locked', 'блокировка -> exit locked'
+        assert cols['repair_queue'].ins[-1]['reason'] == rq.REASON_MODERATED, 'и тикет moderated'
+        assert 'id1' not in _repair_attempts, 'отказ гейта — не попытка починки'
+        out.update(outcome='clean', restriction=None, cookie='c1new')
+        auto_repair_cookie(client, b, 'id1', 'bot', ['c0', 'c1', 'c2'])
+        assert sent[-1] == [{'bot_id': 'u1', 'roblox_auth': 'c1new'}]
+        assert acc.ups[-1][1] == {'$set': {'cookies': ['c1new', 'c2']}}, 'ротация не теряется'
+        out.update(outcome='unauthorized', cookie=None)
+        auto_repair_cookie(client, b, 'id2', 'bot', ['c0', 'c1'])
+        assert _repair_attempts.pop('id2') == 1, '401 на cookies[1] = неудачная попытка'
+        config.PROXY_MONGO_URI, n = '', len(calls)
+        assert alive(client, b, 'id1', 'bot', 'x')['outcome'] == 'no_proxy_config' and len(calls) == n
+    finally:
+        (nap_gate.gate, globals()['repair'], globals()['proxies_col'], tg.send_message,
+         mon.send_event, config.PROXY_MONGO_URI) = saved
+        _alerted_bots.clear()
 
 
 def main():

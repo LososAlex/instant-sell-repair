@@ -65,10 +65,17 @@ STAGE = 'production'    # для бота незнакомой игры; ина�
 GAMES = {
     # метка с IS — чтобы не спутать со свопом
     4: {'label': 'IS MM2', 'stage': 'mm2-instant-sell-production', 'service': 'Instant-sell_mm2',
-        'collection': 'mm2_swap', 'vip_required': True},
+        'collection': 'mm2_swap', 'vip_required': True, 'target': 'IS MM2 prod'},
     0: {'label': 'IS Adopt', 'stage': 'adopt-instant-sell-production', 'service': 'Instant-sell_adopt',
-        'collection': 'adopt_swap'},
+        'collection': 'adopt_swap', 'target': 'IS Adopt prod'},
 }
+
+# Гейт not-approved (nap_gate.py, с 2026-11-13): перед каждым repair бот проверяется ручкой
+# usermoderation v2/not-approved через свой прокси. target в GAMES — куда возвращаем (в лог Grafana).
+# Пустой PROXY_MONGO_URI = fail-closed: никого в прод не возвращаем, алерт в general раз в час.
+PROXY_MONGO_URI = os.environ.get('PROXY_MONGO_URI', '')
+PROXY_DB = 'dedicated-servers'
+PROXY_COLLECTION = 'group_proxies'
 # Починили приватку, а бот снова без доступа раньше этого срока -> не чиним по кругу, алерт.
 # Тот же срок — между попытками купить VIP одному боту.
 PRVT_REPAIR_COOLDOWN_SEC = 3600

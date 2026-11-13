@@ -99,6 +99,29 @@ Adopt — `adopt_swap`; по `roblox_id`) и шлём `PATCH /bots/repair` с `p
   чиним, алерт «проверить VIP-ссылку вручную». Память процесса.
 - На 14.10 из 18 таких ботов свопа: чинится 14 (MM2 11, Adopt 3), у 4 MM2 VIP истёк.
 
+### Гейт not-approved перед каждым repair (с 13.11)
+
+`repair` возвращает бота в прод, поэтому перед **каждым** вызовом (автопочинка кукой, `fixed`-тикет куки и
+капчи, приватка, `REPAIR_ONLY_REASONS`) бот проверяется ручкой `GET usermoderation.roblox.com/v2/not-approved`
+(`nap_gate.py`, функция `alive`). Спека и итог A/B-теста — [ручка not-approved v2](https://claude.ai/artifact/DGsDyFdMfE8zykPNpu1VQA).
+
+- Запрос защищённый, как в тесте: лицо профиля реги (`accounts_p2p.reg_info.data.fingerprint`), `curl_cffi`
+  impersonate chrome, свой прокси бота (`accounts_p2p.proxy` → `dedicated-servers.group_proxies`, ключ
+  `PROXY_MONGO_URI`). Кука — та, что уходит в `repair`; у `repair` без куки — свежая `cookies[0]` из `accounts_p2p`.
+- Результат кэшируется на бота на час (`accounts_p2p.nap_check`): чаще раза в час бота не пробуем.
+- `clean` → `repair` как раньше. Пришла новая кука (ротация) — гейт пишет её в `accounts_p2p` и запись свопа,
+  в `repair` уходит она.
+- Блокировка или бан (`restricted`) → в прод не возвращаем (решение Алексея 13.11): `exit_reason` `locked`
+  (source 5) или `moderated` (source 1), `exit_at`, `exit_note` с началом ограничения + тикет `moderated`. Дальше
+  обычный путь замодеренных: следующим циклом `INVENTORY` и пустой `TRADE` → `DEAD`, `TRADE` со стоком — руками
+  (`DeadModeratedByList.py`). Алерт в `general`.
+- Прочее (сбой сети или прокси, нет лица или прокси, `401`, пауза) → в этот цикл не чиним, бот остаётся в
+  `/broken`. `401` на `cookies[1]` при автопочинке — неудачная попытка, как `repair != 200`.
+- `challenge` / `429` → все проверки процесса на паузе (6 ч / 30 мин), алерт в `general`.
+- Пустой `PROXY_MONGO_URI` → fail-closed: `repair` не делаем никому, алерт в `general` раз в час.
+- Не `clean` → событие `bot_gate_blocked` в Grafana: исход, причина, `source`, `start_time`, `end_time`,
+  `moderation_status`, весь `restriction` JSON, что делали (`action`) и куда (`target`).
+
 ### Игра бота (с 02.10)
 
 `/broken` отдаёт ботов **всех** игр свопа (MM2 и Adopt). По полю `game` (число enum `Games`:
@@ -126,10 +149,11 @@ Adopt — `adopt_swap`; по `roblox_id`) и шлём `PATCH /bots/repair` с `p
 |---|---|
 | `repair_worker.py` | Цикл, разбор `/broken`, применение `fixed`-тикетов |
 | `repair_queue.py` | Работа с тикетами (`create_ticket`, `last_ticket`, `resolve_ticket`, `open_tickets`, `resolve_open`) |
+| `nap_gate.py` | Гейт not-approved перед `repair`. Копия канона `roblox-research/nap_gate.py` пространства: правится там, сюда копируется как есть. Самопроверка: `python nap_gate.py` |
 | `monitoring.py` | События в Grafana (`send_event` → сервис `bot_events`) |
 | `notifications.py` | Телеграм-алерты (`send_message` → топики группы) |
 | `config.py` | Конфиг (ключи, mongo, мониторинг, телеграм, интервал) |
-| `requirements.txt` | `requests`, `pymongo`, `psycopg2-binary` |
+| `requirements.txt` | `requests`, `pymongo`, `psycopg2-binary`, `curl_cffi==0.16.3` (гейт) |
 | `run.bat` | Создаёт venv + ставит зависимости (1-й запуск), запускает воркер, рестартит через 10 с при падении |
 
 ## Конфиг (`config.py`)
@@ -147,6 +171,7 @@ Adopt — `adopt_swap`; по `roblox_id`) и шлём `PATCH /bots/repair` с `p
 | `GAMES[*].collection` / `vip_required`, `PRVT_REPAIR_COOLDOWN_SEC` | Откуда брать VIP-ссылку и код для `NO_ACCESS_TO_PRVT_SERVER`, нужен ли живой VIP; пауза против петли (3600 с) |
 | `SWAPS_PG_DSN` / `CAPTCHA_EMPTY_TYPES` | Postgres бэка (число предметов) / типы, которые списываем при капче и 0 предметов. Пустой DSN = шаг выключен |
 | `NO_LICENSE_EMPTY_GAMES` | Игры, где пустых с `TRADE_NO_LICENSE` списываем в `DEAD` (`(0,)` — Adopt) |
+| `PROXY_MONGO_URI` / `PROXY_DB` / `PROXY_COLLECTION`, `GAMES[*].target` | Прокси ботов для гейта not-approved (`.env`; пусто = `repair` не делаем) / куда возвращаем бота — в лог Grafana |
 
 | `MONITORING_URL` / `MONITORING_KEY` | Сервис событий → Grafana (`bot_events`). Пусто = телеметрия off |
 | `STAGE` | Тег событий (`production`, как в ФС) |
@@ -168,6 +193,8 @@ Adopt — `adopt_swap`; по `roblox_id`) и шлём `PATCH /bots/repair` с `p
 | `bot_private_repaired` (`vip_bought`) | Переотправили VIP-ссылку и код приватки (`NO_ACCESS_TO_PRVT_SERVER`); `vip_bought=true` — перед этим купили VIP |
 | `bot_vip_bought` | Купили VIP боту MM2 в проде через Worker3 |
 | `bot_bad_private` (`reason=…`) | Нет доступа к приватке, не чиним: VIP истёк / не куплен / нет ссылки |
+| `bot_gate_blocked` | Гейт not-approved не пустил бота в прод: `outcome`, `reason`, `source`, `start_time`, `end_time`, `moderation_status`, `restriction`, `action`, `target`, `write_off` |
+| `bot_cookie_rotated` | На пробе гейта Roblox выдал новую куку, записали её |
 
 Имена `event_type` совпадают с ФС, чтобы переиспользовать готовые панели/запросы.
 
@@ -190,6 +217,7 @@ Adopt — `adopt_swap`; по `roblox_id`) и шлём `PATCH /bots/repair` с `p
 | Нет доступа к приватке: переотправили VIP / не чиним (почему) | `general` |
 | Новые брокены за цикл (батч) | `new_brokens_in_prod` |
 | Авто-починка кук не удалась 3 раза подряд | `general` |
+| Гейт: блокировка/бан — в прод не возвращаем, тикет `moderated`; пауза проверок (`challenge` / `429`); пустой `PROXY_MONGO_URI` (раз в час) | `general` |
 
 ## Запуск
 
