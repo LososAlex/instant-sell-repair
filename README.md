@@ -108,7 +108,7 @@ Adopt — `adopt_swap`; по `roblox_id`) и шлём `PATCH /bots/repair` с `p
 
 - Запрос защищённый, как в тесте: лицо профиля реги (`accounts_p2p.reg_info.data.fingerprint`), `curl_cffi`
   impersonate chrome, свой прокси бота (`accounts_p2p.proxy` → `dedicated-servers.group_proxies`, ключ
-  `PROXY_MONGO_URI`). Кука — та, что уходит в `repair`; у `repair` без куки — свежая `cookies[0]` из `accounts_p2p`.
+  `PROXY_MONGO_URI`; свой снят (`valid: false`) — живой прокси той же группы, с 16.11). Кука — та, что уходит в `repair`; у `repair` без куки — свежая `cookies[0]` из `accounts_p2p`.
 - Результат кэшируется на бота на час (`accounts_p2p.nap_check`): чаще раза в час бота не пробуем.
 - `clean` → `repair` как раньше. Пришла новая кука (ротация) — гейт пишет её в `accounts_p2p` и запись свопа,
   в `repair` уходит она.

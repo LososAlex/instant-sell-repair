@@ -5,8 +5,9 @@
 roblox-research/nap_gate.py в пространстве: правишь там и копируешь в репо сервисов как есть.
 
 Запрос только «защищённый», как в тесте: лицо профиля реги (accounts_p2p.reg_info.data.fingerprint),
-curl_cffi impersonate chrome, свой прокси бота (accounts_p2p.proxy -> group_proxies), без CSRF и
-logout, без ретраев. Нет лица или прокси — бота не проверяем и наружу не пускаем.
+curl_cffi impersonate chrome, свой прокси бота (accounts_p2p.proxy -> group_proxies; снят — живой
+прокси той же группы, см. bot_proxy), без CSRF и logout, без ретраев. Нет лица или живого прокси —
+бота не проверяем и наружу не пускаем.
 
 Кука, адрес прокси и текст исключений в лог не идут — только тип исключения.
 Самопроверка без сети: python nap_gate.py
@@ -126,14 +127,27 @@ def paused():
     return _pause['why'] if time.time() < _pause['until'] else None
 
 
+def bot_proxy(proxies, proxy_id):
+    """Свой прокси бота. Снят (valid False) -> живой прокси той же группы: прод (бэк свопа, `bots`)
+    держит у бота только group_id и сам ходит через живой прокси группы (16.11: у 97 из 193 ботов
+    /broken свой прокси снят, not_owned). Привязку в accounts_p2p не меняем.
+    ponytail: первый живой по _id — одна и та же замена на каждой пробе; балансировать, если упрёмся."""
+    px = proxies.find_one({'_id': proxy_id}) if proxy_id else None
+    if px and px.get('valid') is False and px.get('group_id'):
+        px = proxies.find_one({'group_id': px['group_id'], 'valid': {'$ne': False}}, sort=[('_id', 1)])
+        if px:
+            logging.info('nap gate: свой прокси снят, проба через живой прокси группы')
+    return px if px and px.get('valid') is not False else None
+
+
 def _probe(acc, proxies, cookie):
     fp = ((acc.get('reg_info') or {}).get('data') or {}).get('fingerprint') or {}
-    px = proxies.find_one({'_id': acc['proxy']}) if acc.get('proxy') else None
     if not cookie:
         return 'no_cookie', None, None, None
     if not re.search(r'Chrome/\d+', fp.get('user_agent') or ''):
         return 'no_fingerprint', None, None, None
-    if not px or px.get('valid') is False:
+    px = bot_proxy(proxies, acc.get('proxy'))
+    if not px:
         return 'no_proxy', None, None, None   # прямого соединения не бывает
     try:
         return (*check(fp, cookie, proxy_url(px)), None)
@@ -241,6 +255,19 @@ def _selfcheck():
     k = len(acc.sets)
     assert gate(acc, Col(), 1, 'C', 'a', 't', send)['outcome'] == 'paused' and len(acc.sets) == k
     _pause.update(until=0.0, why=None)
+    # свой прокси снят -> первый живой той же группы; в группе живых нет / нет group_id -> None
+    class Px:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def find_one(self, q, proj=None, sort=None):
+            hit = [r for r in self.rows if all(r.get(k) == v if not isinstance(v, dict) else r.get('valid') is not False
+                                               for k, v in q.items())]
+            return min(hit, key=lambda r: r['_id']) if hit else None
+    rows = [{'_id': 1, 'group_id': 'g', 'valid': False}, {'_id': 3, 'group_id': 'g', 'valid': True},
+            {'_id': 2, 'group_id': 'g'}, {'_id': 4, 'group_id': 'h', 'valid': False}, {'_id': 5, 'valid': False}]
+    assert bot_proxy(Px(rows), 1)['_id'] == 2 and bot_proxy(Px(rows), 3)['_id'] == 3
+    assert bot_proxy(Px(rows), 4) is None and bot_proxy(Px(rows), 5) is None and bot_proxy(Px(rows), None) is None
     print('nap_gate selfcheck ok')
 
 
