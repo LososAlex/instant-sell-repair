@@ -160,19 +160,35 @@ def apply_fixed(client, b, doc, ticket, name):
 
 
 def auto_repair_cookie(client, b, _id, name, cookies):
-    """BROKEN, cookies>=2: чиним cookies[1]. При успехе ротация. !=200 -> retry на следующих
-    циклах; после MAX_REPAIR_ATTEMPTS подряд -> алерт в general и продолжаем пробовать.
-    Гейт: 401 на cookies[1] — та же неудачная попытка, что repair != 200; прочие отказы гейта
-    (блокировка, сеть, прокси) попыткой не считаем."""
-    res = alive(client, b, _id, name, 'repair_cookie', cookies[1])
+    """BROKEN, cookies>=2: гейтом проверяем запасные cookies[1:] по порядку до первой живой (Алексей, 17.11).
+    Свежий 401 -> куку сразу убираем из списка (повтор её не пробует). Живая -> repair ею, cookies =
+    [она, *непроверенные после неё]. Все мёртвые -> в списке одна cookies[0] -> тикет refresh_invalid, как при
+    cookies<2. Кэш гейта — на бота, не на куку: перед следующей кукой сбрасываем nap_check, а 401 из кэша
+    (неизвестно, на какой куке) куку не удаляет — ждём свежей пробы.
+    repair != 200 -> retry на следующих циклах; после MAX_REPAIR_ATTEMPTS подряд -> алерт в general и
+    продолжаем. Прочие отказы гейта (блокировка, сеть, прокси, пауза) — стоп, попыткой не считаем."""
+    res = None
+    for i, c in enumerate(cookies[1:], 1):
+        if res:
+            cookies_col(client).update_one({'_id': _id}, {'$unset': {'nap_check': 1}})
+        res = alive(client, b, _id, name, 'repair_cookie', c)
+        if res['outcome'] != 'unauthorized' or res['cached']:
+            break
+        cookies_col(client).update_one({'_id': _id}, {'$pull': {'cookies': c}})
+    if res['outcome'] == 'unauthorized' and not res['cached']:
+        _repair_attempts.pop(_id, None)
+        if rq.create_ticket(client, _id, name, rq.REASON_REFRESH_INVALID):
+            mon.send_event(name, 'bot_broken_refresh', ev(b, reason='all refresh cookies 401'))
+            tg.send_message(f'{tag(b)} <b>{name}</b> все запасные куки мёртвые (401), тикет на обновление', 'broken_refresh')
+        return
     if res['outcome'] == 'clean' and repair([{'bot_id': b['bot_id'], 'roblox_auth': res['cookie']}]):
-        # res['cookie'] — cookies[1] или её ротация (гейт уже записал её в accounts_p2p)
-        cookies_col(client).update_one({'_id': _id}, {'$set': {'cookies': [res['cookie'], *cookies[2:]]}})
+        # res['cookie'] — живая cookies[i] или её ротация (гейт уже записал её в accounts_p2p)
+        cookies_col(client).update_one({'_id': _id}, {'$set': {'cookies': [res['cookie'], *cookies[i + 1:]]}})
         _repair_attempts.pop(_id, None)
         mon.send_event(name, 'bot_cookie_updated', ev(b, mode='auto_refresh'))
-        tg.send_message(f'{tag(b)} <b>{name}</b> обновлена кука (авто, cookies[1])', 'refresh_updated')
+        tg.send_message(f'{tag(b)} <b>{name}</b> обновлена кука (авто, cookies[{i}])', 'refresh_updated')
         return
-    if res['outcome'] not in ('clean', 'unauthorized'):
+    if res['outcome'] != 'clean':
         return
     n = _repair_attempts.get(_id, 0) + 1
     logging.warning('auto-repair !=200 для %s, попытка %d/%d', name, n, config.MAX_REPAIR_ATTEMPTS)
@@ -643,7 +659,8 @@ def selfcheck():
 
 def gate_selfcheck():
     """Гейт в починке без сети: блокировка -> не чиним, exit locked + тикет moderated; ротация куки ->
-    в repair и в cookies уходит новая; 401 на cookies[1] -> неудачная попытка; пустой PROXY_MONGO_URI -> стоп."""
+    в repair и в cookies уходит новая; 401 -> куку из списка, чиним следующей живой, все мёртвые -> тикет
+    refresh_invalid; 401 из кэша ничего не удаляет; пустой PROXY_MONGO_URI -> стоп."""
     class Col:
         def __init__(self):
             self.ups, self.ins = [], []
@@ -667,10 +684,10 @@ def gate_selfcheck():
 
     def fake_gate(acc, px, _id, cookie, action, target, send, stage=None, also=()):
         calls.append((cookie, action, target, len(also)))
-        return {'cookie': out.get('cookie', cookie), 'action': action, 'target': target, 'cached': False,
-                'outcome': out['outcome'], 'restriction': out.get('restriction'),
-                'write_off': out['outcome'] == 'restricted',
-                'reason': nap_gate.reason_text(out['outcome'], out.get('restriction'))}
+        o = out.get('by', {}).get(cookie, out['outcome'])   # исход по куке, по умолчанию — общий
+        return {'cookie': out.get('cookie', cookie), 'action': action, 'target': target,
+                'cached': out.get('cached', False), 'outcome': o, 'restriction': out.get('restriction'),
+                'write_off': o == 'restricted', 'reason': nap_gate.reason_text(o, out.get('restriction'))}
     nap_gate.gate, globals()['proxies_col'] = fake_gate, lambda: None
     globals()['repair'] = lambda items: sent.append(items) or True
     tg.send_message = mon.send_event = lambda *a, **k: None
@@ -687,9 +704,20 @@ def gate_selfcheck():
         auto_repair_cookie(client, b, 'id1', 'bot', ['c0', 'c1', 'c2'])
         assert sent[-1] == [{'bot_id': 'u1', 'roblox_auth': 'c1new'}]
         assert acc.ups[-1][1] == {'$set': {'cookies': ['c1new', 'c2']}}, 'ротация не теряется'
-        out.update(outcome='unauthorized', cookie=None)
+        out.pop('cookie')
+        out.update(outcome='clean', by={'c1': 'unauthorized'})
+        auto_repair_cookie(client, b, 'id3', 'bot', ['c0', 'c1', 'c2', 'c3'])
+        assert sent[-1] == [{'bot_id': 'u1', 'roblox_auth': 'c2'}], 'c1 мёртвая -> чиним живой c2'
+        assert [u for _, u in acc.ups[-3:]] == [{'$pull': {'cookies': 'c1'}}, {'$unset': {'nap_check': 1}},
+                                               {'$set': {'cookies': ['c2', 'c3']}}], 'мёртвую убрали, c3 не пробовали'
+        out.update(outcome='unauthorized', by={}, cached=True)
+        n_q, n_ups = len(cols['repair_queue'].ins), len(acc.ups)
         auto_repair_cookie(client, b, 'id2', 'bot', ['c0', 'c1'])
-        assert _repair_attempts.pop('id2') == 1, '401 на cookies[1] = неудачная попытка'
+        assert len(cols['repair_queue'].ins) == n_q and len(acc.ups) == n_ups, '401 из кэша: ни тикета, ни удаления'
+        out.update(cached=False)
+        auto_repair_cookie(client, b, 'id2', 'bot', ['c0', 'c1', 'c2'])
+        assert 'id2' not in _repair_attempts, '401 — не ретраим'
+        assert cols['repair_queue'].ins[-1]['reason'] == rq.REASON_REFRESH_INVALID, 'все мёртвые -> тикет'
         config.PROXY_MONGO_URI, n = '', len(calls)
         assert alive(client, b, 'id1', 'bot', 'x')['outcome'] == 'no_proxy_config' and len(calls) == n
     finally:
